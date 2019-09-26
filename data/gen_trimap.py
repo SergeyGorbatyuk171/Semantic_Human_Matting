@@ -1,14 +1,18 @@
+import os
+
 import cv2
 import numpy as np
 import argparse
+
+from tqdm import tqdm
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Trimap')
     parser.add_argument('--mskDir', type=str, required=True, help="masks directory")
     parser.add_argument('--saveDir', type=str, required=True, help="where trimap result save to")
-    parser.add_argument('--list', type=str, required=True, help="list of images id")
-    parser.add_argument('--size', type=int, required=True, help="kernel size")
+    # parser.add_argument('--list', type=str, required=True, help="list of images id")
+    parser.add_argument('--size', type=int, required=False, default=10, help="kernel size")
     args = parser.parse_args()
     print(args)
     return args
@@ -58,19 +62,12 @@ def erode_dilate(msk, struc="ELLIPSE", size=(10, 10)):
 
 def main():
     args = get_args()
-    f = open(args.list)
-    names = f.readlines()
-    print("Images Count: {}".format(len(names)))
-    for name in names:
-        msk_name = args.mskDir + "/" + name.strip()[:-4] + ".png"
-        print(msk_name)
-        trimap_name = args.saveDir + "/" + name.strip()[:-4] + ".png"
-        msk = cv2.imread(msk_name, 0)
+    masks = os.listdir(args.mskDir)
+    print("Images Count: {}".format(len(masks)))
+    for name in tqdm(masks):
+        msk = cv2.imread(os.path.join(args.mskDir, name), 0)
         trimap = erode_dilate(msk, size=(args.size, args.size))
-
-        print("Write to {}".format(trimap_name))
-        cv2.imwrite(trimap_name, trimap)
-
+        cv2.imwrite(os.path.join(args.saveDir, name), trimap)
 
 if __name__ == "__main__":
     main()
