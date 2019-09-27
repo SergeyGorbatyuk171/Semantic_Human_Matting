@@ -11,27 +11,18 @@ import torch.nn.functional as F
 from model.M_Net import M_net
 from model.T_Net import T_mv2_unet
 
-
 T_net = T_mv2_unet
 
 
-class net(nn.Module):
-    '''
-		end to end net 
-    '''
-
+class FullNet(nn.Module):
     def __init__(self):
-
-        super(net, self).__init__()
+        super(FullNet, self).__init__()
 
         self.t_net = T_net()
         self.m_net = M_net()
 
-
-
     def forward(self, input):
-
-    	# trimap
+        # trimap
         trimap = self.t_net(input)
         trimap_softmax = F.softmax(trimap, dim=1)
 
@@ -48,10 +39,3 @@ class net(nn.Module):
         alpha_p = fg + unsure * alpha_r
 
         return trimap, alpha_p
-
-
-
-
-
-
-

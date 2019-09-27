@@ -14,6 +14,7 @@ import torch.utils.data as data
 from albumentations import Compose, OneOf, HorizontalFlip, Rotate, OpticalDistortion, HueSaturationValue, \
     RGBShift, RandomBrightness, RandomContrast, JpegCompression, Resize, RandomRain, RandomSunFlare, GaussNoise, \
     IAAAdditiveGaussianNoise, Normalize
+from torch.utils.data import DataLoader
 
 SIZE = (320, 320)
 
@@ -136,7 +137,7 @@ def transforms_train(aug_proba=1.):
     return Compose(
                 transforms=[
                     HorizontalFlip(p=0.5),
-                    Rotate(limit=25, p=0.5),
+                    Rotate(limit=25, p=0.5, border_mode=cv2.BORDER_CONSTANT, value=0, interpolation=cv2.INTER_CUBIC),
                     OneOf([
                         IAAAdditiveGaussianNoise(p=1),
                         GaussNoise(p=1),
@@ -156,7 +157,7 @@ def transforms_train(aug_proba=1.):
                     OpticalDistortion(p=0.1),
                     Resize(*SIZE),
                     Normalize()
-                ], p=aug_proba
+                ], p=aug_proba, additional_targets={'trimap': 'mask'}
             )
 
 
@@ -165,7 +166,7 @@ def transforms_test(aug_proba=1.):
                 transforms=[
                     Resize(*SIZE),
                     Normalize()
-                ], p=aug_proba
+                ], p=aug_proba, additional_targets={'trimap': 'mask'}
             )
 
 
@@ -178,12 +179,35 @@ class CocoDensepose(data.Dataset):
         self.masks = os.listdir(masks_dir)
         self.trimaps = os.listdir(trimaps_dir)
 
-        self.transform=transform
+        self.transform = transform
 
     def __getitem__(self, item):
         image = cv2.imread(self.images[item])
         mask = cv2.imread(self.masks[item], 0)
         trimap = cv2.imread(self.trimaps[item], 0)
 
+        trimap[trimap == 0] = 0
+        trimap[trimap == 128] = 1
+        trimap[trimap == 255] = 2
+
+        data = {'image': image, 'mask': mask, 'trimap': trimap}
+        transformed = self.transform(**data)
+        image = torch.FloatTensor(transformed['image'].transpose((2, 0, 1).satype(float)))
+        mask = torch.FloatTensor(transformed['mask'].astype(float))
+        trimap = torch.FloatTensor(transformed['trimap'].astype(float))
+
+        return {'image': image, 'trimap': trimap, 'alpha': mask}
+
     def __len__(self):
         return len(self.images)
+
+
+def make_loader(data_dir, shuffle=False, transform=None, batch_size=1, workers=4):
+    return DataLoader(
+        dataset=CocoDensepose(data_dir, transform=transform),
+        shuffle=shuffle,
+        num_workers=workers,
+        drop_last=True,
+        batch_size=batch_size,
+        pin_memory=torch.cuda.is_available()
+    )
