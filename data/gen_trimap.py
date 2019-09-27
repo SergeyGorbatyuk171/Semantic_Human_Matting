@@ -69,5 +69,6 @@ def main():
         trimap = erode_dilate(msk, size=(args.size, args.size))
         cv2.imwrite(os.path.join(args.saveDir, name), trimap)
 
+
 if __name__ == "__main__":
     main()

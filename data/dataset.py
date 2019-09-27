@@ -11,6 +11,12 @@ import numpy as np
 import torch
 import torch.utils.data as data
 
+from albumentations import Compose, OneOf, HorizontalFlip, Rotate, OpticalDistortion, HueSaturationValue, \
+    RGBShift, RandomBrightness, RandomContrast, JpegCompression, Resize, RandomRain, RandomSunFlare, GaussNoise, \
+    IAAAdditiveGaussianNoise, Normalize
+
+SIZE = (320, 320)
+
 
 def read_files(data_dir, file_name={}):
 
@@ -124,3 +130,60 @@ class human_matting_data(data.Dataset):
 
     def __len__(self):
         return self.num
+
+
+def transforms_train(aug_proba=1.):
+    return Compose(
+                transforms=[
+                    HorizontalFlip(p=0.5),
+                    Rotate(limit=25, p=0.5),
+                    OneOf([
+                        IAAAdditiveGaussianNoise(p=1),
+                        GaussNoise(p=1),
+                    ], p=0.2),
+                    OneOf([
+                        HueSaturationValue(hue_shift_limit=10,
+                                           sat_shift_limit=15,
+                                           val_shift_limit=10, p=1),
+                        RGBShift(r_shift_limit=10,
+                                 g_shift_limit=10,
+                                 b_shift_limit=10, p=1)
+                    ]),
+                    OneOf([
+                        RandomContrast(p=1),
+                        RandomBrightness(p=1)
+                    ], p=0.3),
+                    OpticalDistortion(p=0.1),
+                    Resize(*SIZE),
+                    Normalize()
+                ], p=aug_proba
+            )
+
+
+def transforms_test(aug_proba=1.):
+    return Compose(
+                transforms=[
+                    Resize(*SIZE),
+                    Normalize()
+                ], p=aug_proba
+            )
+
+
+class CocoDensepose(data.Dataset):
+    def __init__(self, data_dir, transform=None):
+        images_dir = os.path.join(data_dir, 'images')
+        masks_dir = os.path.join(data_dir, 'masks')
+        trimaps_dir = os.path.join(data_dir, 'trimaps')
+        self.images = os.listdir(images_dir)
+        self.masks = os.listdir(masks_dir)
+        self.trimaps = os.listdir(trimaps_dir)
+
+        self.transform=transform
+
+    def __getitem__(self, item):
+        image = cv2.imread(self.images[item])
+        mask = cv2.imread(self.masks[item], 0)
+        trimap = cv2.imread(self.trimaps[item], 0)
+
+    def __len__(self):
+        return len(self.images)
