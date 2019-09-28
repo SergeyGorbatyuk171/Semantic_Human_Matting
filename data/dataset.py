@@ -172,29 +172,35 @@ def transforms_test(aug_proba=1.):
 
 class CocoDensepose(data.Dataset):
     def __init__(self, data_dir, transform=None):
-        images_dir = os.path.join(data_dir, 'images')
-        masks_dir = os.path.join(data_dir, 'masks')
-        trimaps_dir = os.path.join(data_dir, 'trimaps')
-        self.images = os.listdir(images_dir)
-        self.masks = os.listdir(masks_dir)
-        self.trimaps = os.listdir(trimaps_dir)
+        self.images_dir = os.path.join(data_dir, 'images')
+        self.masks_dir = os.path.join(data_dir, 'masks')
+        self.trimaps_dir = os.path.join(data_dir, 'trimaps')
+        self.images = os.listdir(self.images_dir)
+        self.masks = os.listdir(self.masks_dir)
+        self.trimaps = os.listdir(self.trimaps_dir)
 
         self.transform = transform
 
     def __getitem__(self, item):
-        image = cv2.imread(self.images[item])
-        mask = cv2.imread(self.masks[item], 0)
-        trimap = cv2.imread(self.trimaps[item], 0)
+        image = cv2.imread(os.path.join(self.images_dir, self.images[item]))
+        mask = cv2.imread(os.path.join(self.masks_dir, self.masks[item]))
+        trimap = cv2.imread(os.path.join(self.trimaps_dir, self.trimaps[item]))
 
         trimap[trimap == 0] = 0
         trimap[trimap == 128] = 1
         trimap[trimap == 255] = 2
+        assert np.alltrue(np.unique(trimap) == np.array([0, 1, 2])), np.unique(trimap)
+
 
         data = {'image': image, 'mask': mask, 'trimap': trimap}
         transformed = self.transform(**data)
-        image = torch.FloatTensor(transformed['image'].transpose((2, 0, 1).satype(float)))
-        mask = torch.FloatTensor(transformed['mask'].astype(float))
-        trimap = torch.FloatTensor(transformed['trimap'].astype(float))
+        image = torch.FloatTensor(transformed['image'].transpose((2, 0, 1)).astype(float))
+        mask = torch.FloatTensor(transformed['mask'].transpose((2, 0, 1))[0].astype(float) / 255.).unsqueeze_(0)
+        trimap = torch.FloatTensor(transformed['trimap'].transpose((2, 0, 1))[0].astype(float)).unsqueeze_(0)
+
+        # print(mask.shape)
+        # print(torch.min(mask).item())
+        # print(torch.max(mask).item())
 
         return {'image': image, 'trimap': trimap, 'alpha': mask}
 
@@ -202,7 +208,7 @@ class CocoDensepose(data.Dataset):
         return len(self.images)
 
 
-def make_loader(data_dir, shuffle=False, transform=None, batch_size=1, workers=4):
+def make_loader(data_dir, shuffle=False, transform=None, batch_size=6, workers=4):
     return DataLoader(
         dataset=CocoDensepose(data_dir, transform=transform),
         shuffle=shuffle,

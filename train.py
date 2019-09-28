@@ -9,6 +9,7 @@ import argparse
 import math
 import os
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ import torch.optim as optim
 
 from data.dataset import make_loader, transforms_train, transforms_test
 from model.network import FullNet
+from tqdm import tqdm
 
 
 def get_args():
@@ -23,9 +25,10 @@ def get_args():
     parser = argparse.ArgumentParser(description='AIFU')
     parser.add_argument('--dataDir', default='./data/coco_densepose', help='dataset directory')
     parser.add_argument('--saveDir', default='./ckpt', help='model save dir')
+    parser.add_argument('--valOutDir', default='output/temp', help='directory to save output while validation')
     # parser.add_argument('--trainData', default='human_matting_data', help='train dataset name')
     # parser.add_argument('--trainList', default='./data/list.txt', help='train img ID')
-    # parser.add_argument('--load', default='human_matting', help='save model')
+    parser.add_argument('--model_dir', default='coco_densepose', help='where to save model')
 
     parser.add_argument('--finetuning', action='store_true', default=False, help='finetuning the training')
     parser.add_argument('--without_gpu', action='store_true', default=False, help='no use gpu')
@@ -40,7 +43,7 @@ def get_args():
     parser.add_argument('--nEpochs', type=int, default=300, help='number of epochs to train')
     # parser.add_argument('--save_epoch', type=int, default=1, help='number of epochs to save model')
 
-    parser.add_argument('--train_phase', default='end_to_end', choices=['end_to_end', 'pretrain_t_net'],
+    parser.add_argument('--train_phase', default='end_to_end', choices=['end_to_end', 'pre_train_t_net'],
                         help='train phase')
 
     args = parser.parse_args()
@@ -71,7 +74,7 @@ class Train_Log():
     def __init__(self, args):
         self.args = args
 
-        self.save_dir = os.path.join(args.saveDir, args.load)
+        self.save_dir = os.path.join(args.saveDir, args.model_dir)
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
 
@@ -119,7 +122,7 @@ class Train_Log():
         self.logFile.write(log + '\n')
 
 
-def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt):
+def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt, weight=None):
     # -------------------------------------
     # classification loss L_t
     # ------------------------
@@ -129,7 +132,10 @@ def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt):
     # trimap_gt = trimap_gt.view(-1)
     # L_t = criterion(trimap_pre, trimap_gt)
 
-    criterion = nn.CrossEntropyLoss()
+    if weight is None:
+        criterion = nn.CrossEntropyLoss()
+    else:
+        criterion = nn.CrossEntropyLoss(weight=weight)
     L_t = criterion(trimap_pre, trimap_gt[:, 0, :, :].long())
 
     # -------------------------------------
@@ -170,14 +176,16 @@ def main():
         else:
             print("No GPU is is available !")
             device = torch.device('cpu')
+    if not os.path.exists(args.valOutDir):
+        os.mkdir(args.valOutDir)
 
     print("============> Building model ...")
     model = FullNet()
     model.to(device)
 
     print("============> Loading datasets ...")
-    train_loader = make_loader(os.path.join(args.dataDir, 'train'), transform=transforms_train())
-    val_loader = make_loader(os.path.join(args.dataDir, 'val'), transform=transforms_test())
+    train_loader = make_loader(os.path.join(args.dataDir, 'tinyval'), transform=transforms_test(), batch_size=6)
+    val_loader = make_loader(os.path.join(args.dataDir, 'tinyval'), transform=transforms_test(), batch_size=2)
 
     print("============> Set optimizer ...")
     lr = args.lr
@@ -193,6 +201,8 @@ def main():
 
     model.train()
     val_loss_best = 1e8
+    testimg = None
+
     for epoch in range(start_epoch, args.nEpochs + 1):
         print(f'Epoch {epoch}/{args.nEpochs}')
         train_losses = []
@@ -200,34 +210,46 @@ def main():
         L_alpha_ = 0
         L_composition_ = 0
         L_cross_ = 0
+        ce_weights = torch.FloatTensor([1., 5., 2.], ).to(device)
         if args.lrdecayType != 'keep':
             lr = set_lr(args, epoch, optimizer)
-
-        for i, sample_batched in enumerate(train_loader):
+        model.train(True)
+        for i, sample_batched in tqdm(enumerate(train_loader)):
             img, trimap_gt, alpha_gt = sample_batched['image'], sample_batched['trimap'], sample_batched['alpha']
             img, trimap_gt, alpha_gt = img.to(device), trimap_gt.to(device), alpha_gt.to(device)
+            if testimg is None:
+                testimg = img[0].unsqueeze_(0)
+            # print(img.shape, trimap_gt.shape, alpha_gt.shape)
 
             trimap_pre, alpha_pre = model(img)
+            # print(trimap_pre.shape, alpha_pre.shape)
             loss, L_alpha, L_composition, L_cross = loss_function(args,
                                                                   img,
                                                                   trimap_pre,
                                                                   trimap_gt,
                                                                   alpha_pre,
-                                                                  alpha_gt)
+                                                                  alpha_gt,
+                                                                  weight=ce_weights)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            if i % 50 == 0:
+                t_pre, _ = model(testimg)
+                t_pre = t_pre[0].detach().cpu().numpy().transpose((1, 2, 0))
+                flat = np.argmax(t_pre, axis=2) *  127
+                cv2.imwrite(os.path.join(args.valOutDir, f'000.png'), flat)
+
 
             loss_train += loss.item()
             train_losses.append(loss.item())
             L_alpha_ += L_alpha.item()
             L_composition_ += L_composition.item()
             L_cross_ += L_cross.item()
-
         val_losses = []
         model.train(False)
-        for i, sample_batched in enumerate(val_loader):
+        for i, sample_batched in tqdm(enumerate(val_loader)):
             img, trimap_gt, alpha_gt = sample_batched['image'], sample_batched['trimap'], sample_batched['alpha']
             img, trimap_gt, alpha_gt = img.to(device), trimap_gt.to(device), alpha_gt.to(device)
 
@@ -239,9 +261,15 @@ def main():
                                                                   alpha_pre,
                                                                   alpha_gt)
             val_losses.append(loss.item())
+            if i % 10 == 0:
+                tm_pre = trimap_pre.detach().cpu().numpy()
+                for k in range(tm_pre.shape[0]):
+                    ims = tm_pre[k].transpose((1, 2, 0))
+                    flat = np.argmax(ims, axis=2) * 127
+                    cv2.imwrite(os.path.join(args.valOutDir, f'{i}_{k}.png'), flat)
         validation_epoch_loss = np.mean(np.array(val_losses))
         training_epoch_loss = np.mean(np.array(train_losses))
-        print(f'Train loss: {training_epoch_loss}\nVal loss: {validation_epoch_loss}')
+        tqdm.write(f'Train loss: {training_epoch_loss}\nVal loss: {validation_epoch_loss}')
         if validation_epoch_loss < val_loss_best:
             val_loss_best = validation_epoch_loss
             trainlog.save_model(model, epoch)
