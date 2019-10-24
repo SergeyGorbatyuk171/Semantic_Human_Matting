@@ -175,9 +175,9 @@ class CocoDensepose(data.Dataset):
         self.images_dir = os.path.join(data_dir, 'images')
         self.masks_dir = os.path.join(data_dir, 'masks')
         self.trimaps_dir = os.path.join(data_dir, 'trimaps')
-        self.images = os.listdir(self.images_dir)
-        self.masks = os.listdir(self.masks_dir)
-        self.trimaps = os.listdir(self.trimaps_dir)
+        self.images = sorted(os.listdir(self.images_dir))
+        self.masks = sorted(os.listdir(self.masks_dir))
+        self.trimaps = sorted(os.listdir(self.trimaps_dir))
 
         self.transform = transform
 
@@ -189,26 +189,23 @@ class CocoDensepose(data.Dataset):
         trimap[trimap == 0] = 0
         trimap[trimap == 128] = 1
         trimap[trimap == 255] = 2
-        assert np.alltrue(np.unique(trimap) == np.array([0, 1, 2])), np.unique(trimap)
-
+        # assert np.alltrue(np.unique(trimap) == np.array([0, 1, 2])), np.unique(trimap)
 
         data = {'image': image, 'mask': mask, 'trimap': trimap}
         transformed = self.transform(**data)
-        image = torch.FloatTensor(transformed['image'].transpose((2, 0, 1)).astype(float))
+        image_prep = torch.FloatTensor(transformed['image'].transpose((2, 0, 1)).astype(float))
         mask = torch.FloatTensor(transformed['mask'].transpose((2, 0, 1))[0].astype(float) / 255.).unsqueeze_(0)
         trimap = torch.FloatTensor(transformed['trimap'].transpose((2, 0, 1))[0].astype(float)).unsqueeze_(0)
+        image_tb_src = image[:, :, ::-1]
+        image_tb_src = torch.FloatTensor((cv2.resize(image_tb_src, (320, 320))/255).transpose((2, 0, 1)))
 
-        # print(mask.shape)
-        # print(torch.min(mask).item())
-        # print(torch.max(mask).item())
-
-        return {'image': image, 'trimap': trimap, 'alpha': mask}
+        return {'image': image_prep, 'trimap': trimap, 'alpha': mask, 'src': image_tb_src}
 
     def __len__(self):
         return len(self.images)
 
 
-def make_loader(data_dir, shuffle=False, transform=None, batch_size=6, workers=4):
+def make_loader(data_dir, shuffle=True, transform=None, batch_size=6, workers=4):
     return DataLoader(
         dataset=CocoDensepose(data_dir, transform=transform),
         shuffle=shuffle,
