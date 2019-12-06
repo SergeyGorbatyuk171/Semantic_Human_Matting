@@ -171,10 +171,10 @@ def transforms_test(aug_proba=1.):
 
 
 class CocoDensepose(data.Dataset):
-    def __init__(self, data_dir, transform=None):
-        self.images_dir = os.path.join(data_dir, 'images')
-        self.masks_dir = os.path.join(data_dir, 'masks')
-        self.trimaps_dir = os.path.join(data_dir, 'trimaps')
+    def __init__(self, data_dir, args, transform=None):
+        self.images_dir = os.path.join(data_dir, args.images_dir)
+        self.masks_dir = os.path.join(data_dir, args.masks_dir)
+        self.trimaps_dir = os.path.join(data_dir, args.trimaps_dir)
         self.images = sorted(os.listdir(self.images_dir))
         self.masks = sorted(os.listdir(self.masks_dir))
         self.trimaps = sorted(os.listdir(self.trimaps_dir))
@@ -185,6 +185,9 @@ class CocoDensepose(data.Dataset):
         image = cv2.imread(os.path.join(self.images_dir, self.images[item]))
         mask = cv2.imread(os.path.join(self.masks_dir, self.masks[item]))
         trimap = cv2.imread(os.path.join(self.trimaps_dir, self.trimaps[item]))
+        # print(os.path.join(self.images_dir, self.images[item]),
+        #       os.path.join(self.masks_dir, self.masks[item]),
+        #       os.path.join(self.trimaps_dir, self.trimaps[item]))
 
         trimap[trimap == 0] = 0
         trimap[trimap == 128] = 1
@@ -193,21 +196,32 @@ class CocoDensepose(data.Dataset):
 
         data = {'image': image, 'mask': mask, 'trimap': trimap}
         transformed = self.transform(**data)
+        tm = transformed['trimap'].transpose((2, 0, 1))
+        ideal_trimap = np.stack([tm[0] == 0,
+                                 tm[0] == 1,
+                                 tm[0] == 2]).astype(float)
+
+        # print(ideal_trimap.shape)
+        ideal_trimap = torch.FloatTensor(ideal_trimap)
+
         image_prep = torch.FloatTensor(transformed['image'].transpose((2, 0, 1)).astype(float))
         mask = torch.FloatTensor(transformed['mask'].transpose((2, 0, 1))[0].astype(float) / 255.).unsqueeze_(0)
         trimap = torch.FloatTensor(transformed['trimap'].transpose((2, 0, 1))[0].astype(float)).unsqueeze_(0)
         image_tb_src = image[:, :, ::-1]
         image_tb_src = torch.FloatTensor((cv2.resize(image_tb_src, (320, 320))/255).transpose((2, 0, 1)))
 
-        return {'image': image_prep, 'trimap': trimap, 'alpha': mask, 'src': image_tb_src}
+
+        return {'image': image_prep, 'trimap': trimap, 'ideal_trimap': ideal_trimap, 'alpha': mask, 'src': image_tb_src}
 
     def __len__(self):
         return len(self.images)
 
 
-def make_loader(data_dir, shuffle=True, transform=None, batch_size=6, workers=4):
+def make_loader(data_dir, args, shuffle=True, transform=None, batch_size=6, workers=4):
     return DataLoader(
-        dataset=CocoDensepose(data_dir, transform=transform),
+        dataset=CocoDensepose(data_dir,
+                              args,
+                              transform=transform),
         shuffle=shuffle,
         num_workers=workers,
         drop_last=True,

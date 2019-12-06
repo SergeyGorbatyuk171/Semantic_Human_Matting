@@ -1,3 +1,4 @@
+
 import os
 
 import cv2
@@ -18,7 +19,10 @@ def get_args():
     return args
 
 
-def erode_dilate(msk, struc="ELLIPSE", size=(10, 10)):
+def erode_dilate(msk, struc="RECT", size=(10, 10)):
+    Y, X = msk.shape[:2]
+    SZ = (X+Y)//70
+    size = (SZ, SZ)
     if struc == "RECT":
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, size)
     elif struc == "CORSS":
@@ -64,8 +68,11 @@ def main():
     args = get_args()
     masks = os.listdir(args.mskDir)
     print("Images Count: {}".format(len(masks)))
+    if not os.path.exists(args.saveDir):
+        os.makedirs(args.saveDir, exist_ok=True)
     for name in tqdm(masks):
         msk = cv2.imread(os.path.join(args.mskDir, name), 0)
+        assert msk is not None, os.path.join(args.mskDir, name)
         trimap = erode_dilate(msk, size=(args.size, args.size))
         cv2.imwrite(os.path.join(args.saveDir, name), trimap)
 

@@ -1,0 +1,11 @@
+python3 train.py \
+	--dataDir='./data/supervisely' \
+	--masks_dir='masks' \
+	--trimaps_dir='trimaps_pose2seg_c70' \
+	--saveDir='./ckpt' \
+    --model_dir='superv_m_net_pose2seg_exp'\
+	--nThreads=4 \
+	--lr=1e-4 \
+	--lrdecayType='step' \
+	--nEpochs=250 \
+	--train_phase='m_net'

@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -20,6 +21,9 @@ def get_args():
     # Training settings
     parser = argparse.ArgumentParser(description='AIFU')
     parser.add_argument('--dataDir', default='./data/coco_densepose', help='dataset directory')
+    parser.add_argument('--images_dir', default='images', help='images dir name in the data root')
+    parser.add_argument('--masks_dir', default='masks', help='masks dir name in the data root')
+    parser.add_argument('--trimaps_dir', default='trimaps', help='trimaps dir name in the data root')
     parser.add_argument('--saveDir', default='./ckpt', help='model save dir')
     parser.add_argument('--valOutDir', default='output/temp', help='directory to save output while validation')
     # parser.add_argument('--trainData', default='human_matting_data', help='train dataset name')
@@ -39,7 +43,7 @@ def get_args():
     parser.add_argument('--nEpochs', type=int, default=300, help='number of epochs to train')
     # parser.add_argument('--save_epoch', type=int, default=1, help='number of epochs to save model')
 
-    parser.add_argument('--train_phase', default='end_to_end', choices=['end_to_end', 'pre_train_t_net'],
+    parser.add_argument('--train_phase', default='end_to_end', choices=['end_to_end', 't_net', 'm_net'],
                         help='train phase')
 
     args = parser.parse_args()
@@ -119,6 +123,20 @@ class Train_Log():
         self.logFile.write(log + '\n')
 
 
+def loss_m_net(args, alpha_gt, alpha_pre, img):
+    criterion = nn.MSELoss()
+    # print(alpha_gt.shape, alpha_pred.shape, unsure_region.shape)
+    L_alpha = criterion(alpha_gt, alpha_pre)
+
+    fg = torch.cat((alpha_gt, alpha_gt, alpha_gt), 1) * img
+    fg_pre = torch.cat((alpha_pre, alpha_pre, alpha_pre), 1) * img
+    L_composition = criterion(fg, fg_pre)
+    loss = 0.5 * L_alpha + 0.5 * L_composition
+
+    return loss
+
+
+
 def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt, weight=None):
     # -------------------------------------
     # classification loss L_t
@@ -128,6 +146,8 @@ def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt, weight=
     # trimap_pre = trimap_pre.contiguous().view(-1)
     # trimap_gt = trimap_gt.view(-1)
     # L_t = criterion(trimap_pre, trimap_gt)
+
+    # TODO: WTF? CEL considered to take RAW inputs, not Softmaxed
 
     if weight is None:
         criterion = nn.CrossEntropyLoss()
@@ -141,7 +161,7 @@ def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt, weight=
     eps = 1e-6
     # l_alpha
     L_alpha = torch.sqrt(torch.pow(alpha_pre - alpha_gt, 2.) + eps).mean()
-
+    # L_alpha = criterion(alpha_pre, alpha_gt[:, 0, :, :].long())
     # L_composition
     fg = torch.cat((alpha_gt, alpha_gt, alpha_gt), 1) * img
     fg_pre = torch.cat((alpha_pre, alpha_pre, alpha_pre), 1) * img
@@ -151,12 +171,18 @@ def loss_function(args, img, trimap_pre, trimap_gt, alpha_pre, alpha_gt, weight=
     L_p = 0.5 * L_alpha + 0.5 * L_composition
 
     # train_phase
-    if args.train_phase == 'pre_train_t_net':
+    if args.train_phase == 't_net':
         loss = L_t
-    if args.train_phase == 'end_to_end':
+    else:  # training end to end
         loss = L_p + 0.01 * L_t
 
     return loss, L_alpha, L_composition, L_t
+
+
+def display_visuals_tb(tb_writer, visuals, it, metalabel):
+    for label, image in visuals.items():
+        sum_name = '{}/{}'.format(metalabel, label)
+        tb_writer.add_image(sum_name, image, it)
 
 
 def main():
@@ -182,8 +208,10 @@ def main():
     model.to(device)
 
     print("============> Loading datasets ...")
-    train_loader = make_loader(os.path.join(args.dataDir, 'train_cropped'), transform=transforms_train(), batch_size=6)
-    val_loader = make_loader(os.path.join(args.dataDir, 'handcrafted_cropped'), transform=transforms_test(), batch_size=2)
+    train_loader = make_loader(os.path.join(args.dataDir, 'train_cropped'),
+                               transform=transforms_test(), batch_size=6, args=args)
+    val_loader = make_loader(os.path.join(args.dataDir, 'handcrafted_cropped'), transform=transforms_test(),
+                             batch_size=2, args=args)
 
     print("============> Set optimizer ...")
     lr = args.lr
@@ -201,24 +229,33 @@ def main():
     val_loss_best = 1e8
     test_img, test_trimap, test_alpha = None, None, None
 
-
     for epoch in range(start_epoch, args.nEpochs + 1):
         print(f'Epoch {epoch}/{args.nEpochs}')
         train_losses = []
         train_losses_alpha = []
         train_losses_compose = []
         train_losses_trimaps = []
-        ce_weights = torch.FloatTensor([1., 1., 2.], ).to(device)
+        train_losses_mnet = []
+        ce_weights = torch.FloatTensor([1., 1., 2.]).to(device)
         if args.lrdecayType != 'keep':
             lr = set_lr(args, epoch, optimizer)
         model.train(True)
         for i, sample_batched in tqdm(enumerate(train_loader)):
             img, trimap_gt, alpha_gt, src_img = sample_batched['image'], sample_batched['trimap'], sample_batched[
                 'alpha'], sample_batched['src']
-            img, trimap_gt, alpha_gt = img.to(device), trimap_gt.to(device), alpha_gt.to(device)
+            trimap_ideal = sample_batched['ideal_trimap']
+            img, trimap_gt, alpha_gt, trimap_ideal = img.to(device), trimap_gt.to(device), \
+                                                     alpha_gt.to(device), trimap_ideal.to(device)
 
-            trimap_pre, alpha_pre = model(img)
-            loss, L_alpha, L_composition, L_cross = loss_function(args,
+            if args.train_phase == 'm_net':
+                trimap_pre, alpha_pre, alpha_r = model(img, trimap_ideal)
+                L_m = loss_m_net(args, alpha_gt, alpha_pre, img)
+                loss = L_m
+            else:
+                trimap_pre, alpha_pre, alpha_r = model(img)
+
+
+                loss, L_alpha, L_composition, L_cross = loss_function(args,
                                                                   img,
                                                                   trimap_pre,
                                                                   trimap_gt,
@@ -231,54 +268,86 @@ def main():
             optimizer.step()
 
             train_losses.append(loss.item())
-            train_losses_alpha.append(L_alpha.item() if args.train_phase == 'end_to_end' else 0)
-            train_losses_compose.append(L_composition.item() if args.train_phase == 'end_to_end' else 0)
-            train_losses_trimaps.append(L_cross.item())
+            train_losses_alpha.append(L_alpha.item() if args.train_phase != 'm_net' else 0)
+            train_losses_compose.append(L_composition.item() if args.train_phase != 'm_net' else 0)
+            train_losses_trimaps.append(L_cross.item() if args.train_phase != 'm_net' else 0)
+            train_losses_mnet.append(L_m.item() if args.train_phase == 'm_net' else 0)
 
-            if i % 20 == 0:
-                tm_pre = F.softmax(trimap_pre[0], dim=0)
-                tm_pre = torch.stack((tm_pre[2], tm_pre[2], tm_pre[2]), dim=0)
-                a_pre = torch.cat((alpha_pre[0], alpha_pre[0], alpha_pre[0]), dim=0)
-                a_gt = torch.cat((alpha_gt[0], alpha_gt[0], alpha_gt[0]), dim=0)
+
+            if i % 50 == 0:
+                if args.train_phase != 'm_net':
+                    trimap_pre = F.softmax(trimap_pre[0], dim=0)
+                tm_pre = trimap_pre[0][1]*0.5+trimap_pre[0][2]
+                tm_pre = torch.stack([tm_pre, tm_pre, tm_pre], dim=0)
                 tm_gt = torch.cat((trimap_gt[0], trimap_gt[0], trimap_gt[0]), dim=0)
-                tb_writer.add_images(f'train_b{i}_gt',
-                                     torch.stack([src_img[0].to(device), tm_gt / 2, tm_pre.float(), a_gt, a_pre], dim=0),
-                                     global_step=epoch, dataformats='NCHW')
+                a_pre = torch.cat((alpha_pre[0], alpha_pre[0], alpha_pre[0]), dim=0)
+                a_r = torch.cat((alpha_r[0], alpha_r[0], alpha_r[0]), dim=0)
+                a_gt = torch.cat((alpha_gt[0], alpha_gt[0], alpha_gt[0]), dim=0)
+                visuals = OrderedDict()
+                visuals['1_source_img'] = src_img[0].to(device)
+                visuals['2_trimap_predicted'] = tm_pre
+                visuals['3_trimap_gt'] = tm_gt / 2
+                visuals['4_alpha_M_net'] = a_r
+                visuals['5_alpha_predicted'] = a_pre
+                visuals['6_alpha_gt'] = a_gt
+                display_visuals_tb(tb_writer=tb_writer,
+                                   visuals=visuals,
+                                   it=epoch,
+                                   metalabel=f'train_{i}')
 
         val_losses = []
         val_losses_alpha = []
         val_losses_compose = []
         val_losses_trimaps = []
+        val_losses_mnet = []
         model.train(False)
         if not os.path.exists(os.path.join(args.valOutDir, f'epoch_{epoch}')):
             os.makedirs(os.path.join(args.valOutDir, f'epoch_{epoch}'))
-        cur_valdir = os.path.join(args.valOutDir, f'epoch_{epoch}')
         for i, sample_batched in tqdm(enumerate(val_loader)):
             img, trimap_gt, alpha_gt, src_img = sample_batched['image'], sample_batched['trimap'], sample_batched[
                 'alpha'], sample_batched['src']
-            img, trimap_gt, alpha_gt = img.to(device), trimap_gt.to(device), alpha_gt.to(device)
+            trimap_ideal = sample_batched['ideal_trimap']
+            img, trimap_gt, alpha_gt, trimap_ideal = img.to(device), trimap_gt.to(device), \
+                                                     alpha_gt.to(device), trimap_ideal.to(device)
 
-            trimap_pre, alpha_pre = model(img)
-            loss, L_alpha, L_composition, L_cross = loss_function(args,
+            if args.train_phase == 'm_net':
+                trimap_pre, alpha_pre, alpha_r = model(img, trimap_ideal)
+                L_m = loss_m_net(args, alpha_gt, alpha_pre, img)
+                loss = L_m
+            else:
+                trimap_pre, alpha_pre, alpha_r = model(img)
+                loss, L_alpha, L_composition, L_cross = loss_function(args,
                                                                   img,
                                                                   trimap_pre,
                                                                   trimap_gt,
                                                                   alpha_pre,
                                                                   alpha_gt)
             val_losses.append(loss.item())
-            val_losses_alpha.append(L_alpha.item() if args.train_phase == 'end_to_end' else 0)
-            val_losses_compose.append(L_composition.item() if args.train_phase == 'end_to_end' else 0)
-            val_losses_trimaps.append(L_cross.item())
+            val_losses_alpha.append(L_alpha.item() if args.train_phase != 'm_net' else 0)
+            val_losses_compose.append(L_composition.item() if args.train_phase != 'm_net' else 0)
+            val_losses_trimaps.append(L_cross.item() if args.train_phase != 'm_net' else 0)
+            val_losses_mnet.append(L_m.item() if args.train_phase == 'm_net' else 0)
 
-            if i % 40 == 0:
-                tm_pre = F.softmax(trimap_pre[0], dim=0)
-                tm_pre = torch.stack((tm_pre[2], tm_pre[2], tm_pre[2]), dim=0)
+            if i % 15 == 0:
+                if args.train_phase != 'm_net':
+                    trimap_pre = F.softmax(trimap_pre[0], dim=0)
+                tm_pre = trimap_pre[0][1] * 0.5 + trimap_pre[0][2]
+                tm_pre = torch.stack([tm_pre, tm_pre, tm_pre], dim=0)
                 tm_gt = torch.cat((trimap_gt[0], trimap_gt[0], trimap_gt[0]), dim=0)
                 a_pre = torch.cat((alpha_pre[0], alpha_pre[0], alpha_pre[0]), dim=0)
+                a_r = torch.cat((alpha_r[0], alpha_r[0], alpha_r[0]), dim=0)
                 a_gt = torch.cat((alpha_gt[0], alpha_gt[0], alpha_gt[0]), dim=0)
-                tb_writer.add_images(f'val_b{i}_gt',
-                                     torch.stack([src_img[0].to(device), tm_gt / 2, tm_pre.float(), a_gt, a_pre], dim=0),
-                                     global_step=epoch, dataformats='NCHW')
+                visuals = OrderedDict()
+                visuals['1_source_img'] = src_img[0].to(device)
+                visuals['2_trimap_predicted'] = tm_pre
+                visuals['3_trimap_gt'] = tm_gt / 2
+                visuals['4_alpha_M_net'] = a_r
+                visuals['5_alpha_predicted'] = a_pre
+                visuals['6_alpha_gt'] = a_gt
+                display_visuals_tb(tb_writer=tb_writer,
+                                   visuals=visuals,
+                                   it=epoch,
+                                   metalabel=f'val_{i}')
 
         validation_epoch_loss = np.mean(np.array(val_losses))
         training_epoch_loss = np.mean(np.array(train_losses))
@@ -287,11 +356,13 @@ def main():
         tb_writer.add_scalar('LossAlpha/Train', np.mean(np.array(train_losses_alpha)), epoch)
         tb_writer.add_scalar('LossCompose/Train', np.mean(np.array(train_losses_compose)), epoch)
         tb_writer.add_scalar('LossTrimap/Train', np.mean(np.array(train_losses_trimaps)), epoch)
+        tb_writer.add_scalar('Loss_Mnet/Train', np.mean(np.array(train_losses_mnet)), epoch)
 
         tb_writer.add_scalar('Loss/Val', validation_epoch_loss, epoch)
         tb_writer.add_scalar('LossAlpha/Val', np.mean(np.array(val_losses_alpha)), epoch)
         tb_writer.add_scalar('LossCompose/Val', np.mean(np.array(val_losses_compose)), epoch)
         tb_writer.add_scalar('LossTrimap/Val', np.mean(np.array(val_losses_trimaps)), epoch)
+        tb_writer.add_scalar('Loss_Mnet/Val', np.mean(np.array(val_losses_mnet)), epoch)
 
         if validation_epoch_loss < val_loss_best:
             val_loss_best = validation_epoch_loss

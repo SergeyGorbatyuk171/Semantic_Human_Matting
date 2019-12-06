@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from model.M_Net import M_net
+from model.BigM_Net import M_net as BigM_Net
 from model.T_Net import T_mv2_unet
 from model.UNet import UNet16
 
@@ -20,13 +21,17 @@ class FullNet(nn.Module):
         super(FullNet, self).__init__()
 
         self.t_net = UNet16(pretrained=True)
-        self.m_net = M_net()
+        self.m_net = BigM_Net()
         self.tb_writer = tb_writer
 
-    def forward(self, input):
+    def forward(self, input, trimap_ideal=None):
         # trimap
-        trimap = self.t_net(input)
-        trimap_softmax = F.softmax(trimap, dim=1)
+        if trimap_ideal is None:
+            trimap = self.t_net(input)
+            trimap_softmax = F.softmax(trimap, dim=1)
+        else:
+            trimap = trimap_ideal
+            trimap_softmax = trimap_ideal
 
         # paper: bs, fs, us
         # was: bg, fg, unsure
@@ -36,6 +41,7 @@ class FullNet(nn.Module):
         #                      torch.stack([trimap[0], fg_img], dim=0), dataformats='NCHW')
 
         # concat input and trimap
+        # print(input.shape, trimap_softmax.shape)
         m_net_input = torch.cat((input, trimap_softmax), 1)
 
         # matting
@@ -44,4 +50,4 @@ class FullNet(nn.Module):
         # paper : alpha_p = fs + us * alpha_r
         alpha_p = fg + unsure * alpha_r
 
-        return trimap, alpha_p
+        return trimap, alpha_p, alpha_r
